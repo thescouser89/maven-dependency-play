@@ -34,6 +34,9 @@ import java.util.Set;
  * Uses galley + cartographer to read relationships from a given POM file. If necessary, uses maven central to resolve
  * parent POMs and BOMs in order to arrive at a fully inherited Maven project model. Dependencies defined in the parent
  * will be included, if present.
+ *
+ * NOTE: code obtained from John Casey (@jdcasey)
+ * https://github.com/Commonjava/aprox-stack-examples/blob/master/cartographer/cartographer-modelproc-example/src/main/java/org/commonjava/cartographer/ex/RelationshipReader.java
  */
 public class RelationshipReader
 {
