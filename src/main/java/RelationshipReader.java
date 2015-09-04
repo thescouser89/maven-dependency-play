@@ -1,5 +1,4 @@
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.StringUtils;
 import org.commonjava.cartographer.CartoDataException;
 import org.commonjava.cartographer.CartographerCore;
 import org.commonjava.cartographer.CartographerCoreBuilder;
@@ -11,25 +10,21 @@ import org.commonjava.maven.atlas.graph.spi.neo4j.FileNeo4jConnectionFactory;
 import org.commonjava.maven.atlas.ident.ref.ProjectVersionRef;
 import org.commonjava.maven.galley.TransferException;
 import org.commonjava.maven.galley.maven.GalleyMavenException;
-import org.commonjava.maven.galley.maven.model.view.DependencyView;
 import org.commonjava.maven.galley.maven.model.view.MavenPomView;
 import org.commonjava.maven.galley.maven.parse.MavenPomReader;
 import org.commonjava.maven.galley.maven.parse.PomPeek;
 import org.commonjava.maven.galley.maven.util.ArtifactPathUtils;
-import org.commonjava.maven.galley.model.ConcreteResource;
 import org.commonjava.maven.galley.model.Location;
 import org.commonjava.maven.galley.model.SimpleLocation;
-import org.commonjava.maven.galley.model.Transfer;
 
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.URL;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -42,80 +37,116 @@ import java.util.stream.Collectors;
  * NOTE: code obtained from John Casey (@jdcasey)
  * https://github.com/Commonjava/aprox-stack-examples/blob/master/cartographer/cartographer-modelproc-example/src/main/java/org/commonjava/cartographer/ex/RelationshipReader.java
  */
-public class RelationshipReader
-{
-    private final CartographerCore carto;
-    private Path tempDir;
+public class RelationshipReader {
 
-    public RelationshipReader(File cacheDir) throws IOException, CartoDataException {
+    private CartographerCore getCartographerCoreInstance(File cacheDir) throws IOException, CartoDataException {
 
-        File unused = File.createTempFile( "unused.", ".db" );
-        unused.delete();
-
-        carto = new CartographerCoreBuilder(cacheDir,
-                                            new FileNeo4jConnectionFactory(unused, true))
-                                                .withDefaultTransports()
-                                                .build();
+        return new CartographerCoreBuilder(cacheDir,
+                                           new FileNeo4jConnectionFactory(null, true))
+                                             .withDefaultTransports()
+                                             .build();
     }
 
-    public Set<ProjectRelationship<?, ?>> readRelationships(File pomRepoDir, ProjectVersionRef gav )
-            throws TransferException, GalleyMavenException, URISyntaxException, CartoDataException, IOException
-    {
+    public List<GAVModule> readRelationships(File pomRepoDir)
+            throws TransferException, GalleyMavenException, URISyntaxException, CartoDataException, IOException {
 
-        MavenPomReader pomReader = carto.getGalley().getPomReader();
-        MavenModelProcessor processor = new MavenModelProcessor();
+        File tempDir = Files.createTempDirectory("deps").toFile();
 
-        Location location = new SimpleLocation( "file:" + pomRepoDir.getAbsolutePath() );
 
-        List<? extends Location> repoLocations =
-                Arrays.asList( location, new SimpleLocation( "central", "http://repo.maven.apache.org/maven2/" ),
-                        new SimpleLocation("eap", "http://maven.repository.redhat.com/techpreview/all"));
+        try {
+            List<GAVModule> gavModules = new LinkedList<>();
+            CartographerCore carto = getCartographerCoreInstance(tempDir);
+            List<ProjectVersionRef> projectVersionRefs = setupRepositoryDirectoryFromClasspath(tempDir, findAllPomFiles(pomRepoDir), carto);
 
-        MavenPomView pomView = pomReader.read( gav, repoLocations );
+            for(ProjectVersionRef ref: projectVersionRefs) {
 
-        // some debug output from the pom view itself
-        System.out.println( "Docs in view:\n  " + StringUtils.join( pomView.getDocRefStack(), "\n  " ) );
+                MavenPomReader pomReader = carto.getGalley().getPomReader();
+                MavenPomView pomView = pomReader.read(ref, getRepoLocations(tempDir));
 
-        System.out.println( "Found dependency artifacts:" );
-        List<DependencyView> deps = pomView.getAllDirectDependencies();
-        deps.forEach( ( dep ) -> {
-            try
-            {
-                System.out.println( dep.asArtifactRef() );
+                Location location = new SimpleLocation("file:" + tempDir.getAbsolutePath());
+                URI src = new URI(location.getUri());
+
+                DiscoveryConfig disConf = new DiscoveryConfig(src);
+                disConf.setIncludeBuildSection(false);
+                disConf.setIncludeManagedDependencies(false);
+                disConf.setIncludeManagedPlugins(false);
+
+                MavenModelProcessor processor = new MavenModelProcessor();
+                DiscoveryResult result = processor.readRelationships(pomView, src, disConf);
+                Set<ProjectRelationship<?, ?>> relationships = result.getAcceptedRelationships();
+
+                gavModules.add(generateGAVModule(ref, relationships));
             }
-            catch ( GalleyMavenException e )
-            {
-                e.printStackTrace();
-            }
-        } );
-        // back to the main event...
-
-        URI src = new URI( location.getUri() );
-
-        DiscoveryConfig disConf = new DiscoveryConfig( src );
-        disConf.setIncludeBuildSection( false );
-        disConf.setIncludeManagedDependencies( false );
-        disConf.setIncludeManagedPlugins( false );
-
-        DiscoveryResult result = processor.readRelationships( pomView, src, disConf );
-
-        return result.getAcceptedRelationships();
-    }
-
-    public void setupRepositoryDirectoryFromClasspath( File dir, String[] poms )
-            throws TransferException, IOException
-    {
-        for ( String pom: poms )
-        {
-            File pomFile = new File(pom);
-            PomPeek peek = new PomPeek( pomFile );
-
-            String path = ArtifactPathUtils.formatArtifactPath( peek.getKey().asPomArtifact(),
-                                                             carto.getGalley().getTypeMapper() );
-
-            File f = new File( dir, path );
-            f.getParentFile().mkdirs();
-            FileUtils.copyFile( pomFile, f );
+            return gavModules;
+        } finally {
+            FileUtils.deleteDirectory(tempDir);
         }
+    }
+
+
+    // TODO: get the list of locations from main pom.xml
+    private List<? extends Location> getRepoLocations(File cacheDir) {
+        Location location = new SimpleLocation( "file:" + cacheDir.getAbsolutePath() );
+        List<? extends Location> repoLocations =
+                Arrays.asList(location, new SimpleLocation("central", "http://repo.maven.apache.org/maven2/"),
+                        new SimpleLocation("eap", "http://maven.repository.redhat.com/techpreview/all"),
+                        new SimpleLocation("sonatype", "https://oss.sonatype.org/content/repositories"));
+
+        return repoLocations;
+    }
+
+    private List<ProjectVersionRef> setupRepositoryDirectoryFromClasspath(File dir, List<String> poms, CartographerCore carto)
+            throws TransferException, IOException {
+
+        List<ProjectVersionRef> projectVersionRefs = new LinkedList<>();
+        for (String pom: poms) {
+            File pomFile = new File(pom);
+            PomPeek peek = new PomPeek(pomFile);
+            projectVersionRefs.add(peek.getKey());
+
+            String path = ArtifactPathUtils.formatArtifactPath(peek.getKey().asPomArtifact(),
+                                                               carto.getGalley().getTypeMapper());
+
+            File f = new File(dir, path);
+            f.getParentFile().mkdirs();
+            FileUtils.copyFile(pomFile, f);
+        }
+        return projectVersionRefs;
+    }
+
+    private List<String> findAllPomFiles(File folderDir) {
+
+        Collection<File> pomFilePaths = FileUtils.listFiles(folderDir, new String[]{"xml"}, true);
+
+        List<String> paths = pomFilePaths.stream()
+                                    .filter(f -> f.getName().equals("pom.xml"))
+                                    .map(f -> f.getAbsolutePath())
+                                    .collect(Collectors.toList());
+
+        return paths;
+    }
+
+    private GAVModule generateGAVModule(ProjectVersionRef ref, Set<ProjectRelationship<?, ?>> relationships) {
+        GAVModule module = new GAVModule(new GAV(ref.getGroupId(), ref.getArtifactId(), ref.getVersionString()));
+
+        for (ProjectRelationship<?, ?> relationship: relationships) {
+            ProjectVersionRef target = relationship.getTarget();
+            GAV targetGAV = new GAV(target.getGroupId(), target.getArtifactId(), target.getVersionString());
+            switch(relationship.getType()) {
+                case DEPENDENCY:
+                    module.addDependency(targetGAV);    break;
+                case BOM:
+                    module.addBom(targetGAV);           break;
+                case PARENT:
+                    module.setParent(targetGAV);        break;
+                case EXTENSION:
+                    module.addExtension(targetGAV);     break;
+                case PLUGIN:
+                    module.addPlugin(targetGAV);        break;
+                case PLUGIN_DEP:
+                    module.addPluginDeps(targetGAV);    break;
+            }
+        }
+        return module;
     }
 }
